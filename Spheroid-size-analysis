@@ -1,0 +1,885 @@
+import math
+import numpy as np
+from scipy.optimize import leastsq
+import matplotlib.pyplot as plt
+import numdifftools as nd
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import tkinter as tk
+from tkinter import ttk, messagebox
+import threading
+
+# Constants
+KB = 1.38065e-23  # Boltzmann constant in J/K
+T = 298.15  # Temperature in Kelvin
+eta = 0.00089  # Viscosity in Pa*s
+epsilon = 1e-14  # Small quantity to avoid division by zero
+
+class DiffusionCalculatorGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Ellipsoidal Particle Diffusion Coefficient Calculator")
+        self.root.geometry("1200x800")
+        
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Create tabs
+        self.create_calculation_tab()
+        self.create_comparison_tab()
+        self.create_info_tab()
+        
+    def create_calculation_tab(self):
+        # Calculation tab
+        self.calc_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.calc_frame, text="Parameter Calculation")
+        
+        # Main frame
+        main_frame = ttk.Frame(self.calc_frame)
+        main_frame.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Left side - Input parameters
+        input_frame = ttk.LabelFrame(main_frame, text="Input Parameters")
+        input_frame.pack(side='left', fill='y', padx=(0, 10))
+        
+        # Calculation mode
+        ttk.Label(input_frame, text="Calculation Mode:").pack(anchor='w', pady=2)
+        self.calc_mode = tk.StringVar(value="calculate_b")
+        ttk.Radiobutton(input_frame, text="Calculate b (given D and a)", 
+                       variable=self.calc_mode, value="calculate_b").pack(anchor='w')
+        ttk.Radiobutton(input_frame, text="Calculate a (given D and b)", 
+                       variable=self.calc_mode, value="calculate_a").pack(anchor='w')
+        
+        # Model selection
+        ttk.Label(input_frame, text="Theoretical Model:").pack(anchor='w', pady=(10, 2))
+        self.model = tk.StringVar(value="original")
+        models = [("Original (Hydraulic Radius)", "original"),
+                 ("Perrin (1936)", "perrin"),
+                 ("Modern Correction", "modern")]
+        
+        for text, value in models:
+            ttk.Radiobutton(input_frame, text=text, variable=self.model, value=value).pack(anchor='w')
+        
+        # Input fields
+        ttk.Label(input_frame, text="Diffusion Coefficient D (m²/s):").pack(anchor='w', pady=(10, 2))
+        self.d_entry = ttk.Entry(input_frame, width=20)
+        self.d_entry.pack(anchor='w')
+        self.d_entry.insert(0, "1e-12")
+        
+        ttk.Label(input_frame, text="Parameter a (nm):").pack(anchor='w', pady=(5, 2))
+        self.a_entry = ttk.Entry(input_frame, width=20)
+        self.a_entry.pack(anchor='w')
+        self.a_entry.insert(0, "5.0")
+        
+        ttk.Label(input_frame, text="Parameter b (nm):").pack(anchor='w', pady=(5, 2))
+        self.b_entry = ttk.Entry(input_frame, width=20)
+        self.b_entry.pack(anchor='w')
+        self.b_entry.insert(0, "15.0")
+        
+        # Uncertainty section
+        uncertainty_frame = ttk.LabelFrame(input_frame, text="Uncertainty Analysis (Optional)")
+        uncertainty_frame.pack(fill='x', pady=(10, 0))
+        
+        self.uncertainty_var = tk.BooleanVar()
+        ttk.Checkbutton(uncertainty_frame, text="Calculate uncertainties", 
+                       variable=self.uncertainty_var).pack(anchor='w')
+        
+        ttk.Label(uncertainty_frame, text="σ_D (m²/s):").pack(anchor='w', pady=(5, 2))
+        self.sigma_d_entry = ttk.Entry(uncertainty_frame, width=20)
+        self.sigma_d_entry.pack(anchor='w')
+        self.sigma_d_entry.insert(0, "1e-14")
+        
+        ttk.Label(uncertainty_frame, text="σ_a (nm):").pack(anchor='w', pady=(5, 2))
+        self.sigma_a_entry = ttk.Entry(uncertainty_frame, width=20)
+        self.sigma_a_entry.pack(anchor='w')
+        self.sigma_a_entry.insert(0, "0.1")
+        
+        ttk.Label(uncertainty_frame, text="σ_b (nm):").pack(anchor='w', pady=(5, 2))
+        self.sigma_b_entry = ttk.Entry(uncertainty_frame, width=20)
+        self.sigma_b_entry.pack(anchor='w')
+        self.sigma_b_entry.insert(0, "0.1")
+        
+        # Calculate button
+        ttk.Button(input_frame, text="Calculate", command=self.calculate).pack(pady=10)
+        
+        # Right side - Results and plots
+        results_frame = ttk.Frame(main_frame)
+        results_frame.pack(side='right', fill='both', expand=True)
+        
+        # Results text
+        results_text_frame = ttk.LabelFrame(results_frame, text="Results")
+        results_text_frame.pack(fill='x', pady=(0, 10))
+        
+        self.results_text = tk.Text(results_text_frame, height=10, width=60)
+        scrollbar = ttk.Scrollbar(results_text_frame, orient="vertical", command=self.results_text.yview)
+        self.results_text.configure(yscrollcommand=scrollbar.set)
+        self.results_text.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Plot frame
+        plot_frame = ttk.LabelFrame(results_frame, text="Analysis Plots")
+        plot_frame.pack(fill='both', expand=True)
+        
+        self.fig = Figure(figsize=(10, 6), dpi=100)
+        self.canvas = FigureCanvasTkAgg(self.fig, plot_frame)
+        self.canvas.get_tk_widget().pack(fill='both', expand=True)
+        
+    def create_comparison_tab(self):
+        # Comparison tab
+        self.comp_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.comp_frame, text="Model Comparison")
+        
+        # Input frame for comparison
+        comp_input_frame = ttk.LabelFrame(self.comp_frame, text="Input Parameters for Comparison")
+        comp_input_frame.pack(fill='x', padx=10, pady=10)
+        
+        # Parameters
+        params_frame = ttk.Frame(comp_input_frame)
+        params_frame.pack(fill='x', padx=10, pady=10)
+        
+        ttk.Label(params_frame, text="a (nm):").grid(row=0, column=0, sticky='w', padx=(0, 5))
+        self.comp_a_entry = ttk.Entry(params_frame, width=15)
+        self.comp_a_entry.grid(row=0, column=1, padx=(0, 20))
+        self.comp_a_entry.insert(0, "5.0")
+        
+        ttk.Label(params_frame, text="b (nm):").grid(row=0, column=2, sticky='w', padx=(0, 5))
+        self.comp_b_entry = ttk.Entry(params_frame, width=15)
+        self.comp_b_entry.grid(row=0, column=3, padx=(0, 20))
+        self.comp_b_entry.insert(0, "15.0")
+        
+        ttk.Button(params_frame, text="Compare Models", command=self.compare_models).grid(row=0, column=4)
+        
+        # Results frame for comparison
+        comp_results_frame = ttk.LabelFrame(self.comp_frame, text="Comparison Results")
+        comp_results_frame.pack(fill='both', expand=True, padx=10, pady=(0, 10))
+        
+        self.comp_results_text = tk.Text(comp_results_frame, height=8)
+        comp_scrollbar = ttk.Scrollbar(comp_results_frame, orient="vertical", command=self.comp_results_text.yview)
+        self.comp_results_text.configure(yscrollcommand=comp_scrollbar.set)
+        self.comp_results_text.pack(side="left", fill="both", expand=True)
+        comp_scrollbar.pack(side="right", fill="y")
+        
+        # Plot frame for comparison
+        comp_plot_frame = ttk.LabelFrame(self.comp_frame, text="Model Comparison Plots")
+        comp_plot_frame.pack(fill='both', expand=True, padx=10, pady=(0, 10))
+        
+        self.comp_fig = Figure(figsize=(12, 8), dpi=100)
+        self.comp_canvas = FigureCanvasTkAgg(self.comp_fig, comp_plot_frame)
+        self.comp_canvas.get_tk_widget().pack(fill='both', expand=True)
+        
+    def create_info_tab(self):
+        # Information tab
+        self.info_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.info_frame, text="Model Information")
+        
+        info_text = """
+ELLIPSOIDAL PARTICLE DIFFUSION COEFFICIENT CALCULATOR
+====================================================
+
+This program implements several theoretical models for calculating the diffusion coefficient 
+of prolate ellipsoidal particles in solution.
+
+IMPLEMENTED MODELS:
+==================
+
+1. ORIGINAL MODEL (Hydraulic Radius)
+   • Based on equivalent hydraulic radius
+   • Formula: D = kT / (6π * rH * η)
+   • Simple but may be less accurate for high aspect ratios
+
+2. PERRIN MODEL (1936)
+   • Classical theory for prolate ellipsoids
+   • Includes correction factors based on eccentricity
+   • Formula: D = (kT * S) / (6π * req * η)
+   • Where S is the Perrin shape factor
+
+3. MODERN CORRECTION MODEL
+   • Modern corrections based on numerical simulations
+   • Accounts for average particle orientation
+   • Better accuracy for moderate aspect ratios (p ≤ 10)
+   • Asymptotic formula for high aspect ratios
+
+USAGE RECOMMENDATIONS:
+=====================
+• Low aspect ratios (1-2):      All models give similar results
+• Moderate aspect ratios (2-10): Prefer Modern Correction or Perrin
+• High aspect ratios (>10):     Modern Correction with asymptotic formula
+• Comparison/validation:         Use Model Comparison tab
+
+CONSTANTS USED:
+==============
+• Boltzmann constant: 1.38065×10⁻²³ J/K
+• Temperature: 298.15 K (25°C)
+• Viscosity: 0.00089 Pa·s (water at 25°C)
+
+PARAMETERS:
+==========
+• a: Semi-minor axis (nm)
+• b: Semi-major axis (nm)
+• D: Diffusion coefficient (m²/s)
+• Aspect ratio = b/a (must be ≥ 1 for prolate ellipsoids)
+
+UNCERTAINTY ANALYSIS:
+====================
+The program can calculate uncertainties using error propagation theory.
+Provide standard deviations for the known parameters to get uncertainty 
+estimates for the calculated parameter.
+        """
+        
+        info_text_widget = tk.Text(self.info_frame, wrap='word', padx=10, pady=10)
+        info_scrollbar = ttk.Scrollbar(self.info_frame, orient="vertical", command=info_text_widget.yview)
+        info_text_widget.configure(yscrollcommand=info_scrollbar.set)
+        
+        info_text_widget.insert('1.0', info_text)
+        info_text_widget.configure(state='disabled')
+        
+        info_text_widget.pack(side="left", fill="both", expand=True)
+        info_scrollbar.pack(side="right", fill="y")
+
+    # Calculation functions (translated from original code)
+    def calculate_rH(self, a, b):
+        """Calculate equivalent hydraulic radius"""
+        return (a/2 * b**2 / 4)**(1/3)
+
+    def calculate_D_original(self, a, b):
+        """Original model using hydraulic radius"""
+        rH = self.calculate_rH(a, b)
+        return (KB * T) / (6 * math.pi * rH * eta * 1e-9)
+
+    def calculate_D_perrin(self, a, b):
+        """Perrin (1936) model for prolate and oblate spheroids."""
+        p = b / a                              # axial/equatorial aspect ratio
+        r_eq = ((a**2 * b)/8)**(1/3)              # equivalent‐volume sphere radius (nm)
+
+        # spherical limit
+        if abs(p - 1) < 1e-8:
+            return (KB * T) / (6 * math.pi * eta * a * 1e-9)
+
+        # eccentricity & Perrin shape‐factor S
+        if p > 1:
+            # prolate: b > a
+            e = math.sqrt(1 - (a / b)**2)
+            # S = 2·atanh(e)/e                                        :contentReference[oaicite:0]{index=0}
+            S = 2 * math.atanh(e) / e
+        else:
+            # oblate: b < a
+            e = math.sqrt(1 - (b / a)**2)
+            # S = 2·atan(e)/e                                         :contentReference[oaicite:1]{index=1}
+            S = 2 * math.atan(e) / e
+
+        # Perrin translational friction factor f_P = 2·p^(2/3)/S          :contentReference[oaicite:2]{index=2}
+        f_P = 2 * p**(2/3) / S
+
+        # hydration‐layer correction (same as your original fgw)
+        fgw = ( (3/2) * (0.14 / r_eq)**(1/3)
+                + 1 / (1 + (0.14 / r_eq)**(1/3)) )
+
+        # Einstein relation: D = kT / [6π η r_eq · f_P], with fgw folded in
+        return (KB * T * fgw) / (6 * math.pi * eta * r_eq * f_P * 1e-9)
+
+    # def calculate_D_modern(self, a, b):
+    #     """Modern correction model"""
+    #     p = b / a  # aspect ratio
+        
+    #     if p == 1:
+    #         r_eq = ((a/2)*(b**2 /4))**(1/3)
+    #         return (KB * T) / (6 * math.pi * eta * r_eq * 1e-9)
+    #     elif p > 1:
+    #         ln_p = math.log(p)
+    #         f_corr = 1.009 + 0.01395*ln_p + 0.07880*ln_p**2 + 0.00604*ln_p**3
+            
+    #         r_eq = ((a**2 * b)/8)**(1/3)
+    #         return (KB * T * f_corr) / (6 * math.pi * eta * r_eq * 1e-9)
+    #     else:
+    #         raise ValueError("Aspect ratio b/a must be >= 1")
+    def calculate_D_modern(self, a, b):
+        """
+        Calcola il coefficiente di diffusione per particelle disk-like usando 
+        le equazioni di Ortega e García de la Torre (2003).
+        
+        Args:
+            a: raggio maggiore (raggio del disco) in nm
+            b: semi-asse minore (metà spessore del disco) in nm
+        
+        Returns:
+            D_corrected: coefficiente di diffusione traslazionale in m²/s
+        """
+        
+        # Per particelle disk-like: 
+        # L = 2*b (spessore totale)
+        # d = 2*a (diametro)
+        L =  b  # spessore totale
+        d =  a  # diametro
+        
+        # Calcola aspect ratio p = L/d
+        p = L / d
+        
+        # Volume del cilindro/disco
+        V = math.pi * L * d**2 / 4  # in nm³
+        
+        # Coefficiente di frizione per una sfera equivalente (stesso volume)
+        f_0 = 6 * math.pi * eta * L * (3/(16*p**2))**(1/3) *1e-9
+        
+        # Calcola f/f_0 usando l'equazione (16) del paper
+        ln_p = math.log(p)
+        f_ratio = (1.009 + 1.395e-2 * ln_p + 7.880e-2 * ln_p**2 + 
+                6.040e-3 * ln_p**3)
+        
+        # Coefficiente di frizione corretto
+        f_corrected = f_0 * f_ratio
+        
+        # Coefficiente di diffusione traslazionale
+        D_corrected = KB * T / f_corrected
+        
+        return D_corrected
+
+    def get_D_function(self, model):
+        """Return the appropriate diffusion calculation function"""
+        if model == "original":
+            return self.calculate_D_original
+        elif model == "perrin":
+            return self.calculate_D_perrin
+        elif model == "modern":
+            return self.calculate_D_modern
+        else:
+            raise ValueError("Unknown model")
+
+    def objective_function_b(self, b, a, D_target, model):
+        """Objective function for optimizing b"""
+        if b[0] <= a:
+            return np.inf
+        
+        D_calc = self.get_D_function(model)(a, b[0])
+        return D_calc - D_target
+
+    def objective_function_a(self, a, b, D_target, model):
+        """Objective function for optimizing a"""
+        if a[0] <= 0 or a[0] >= b:
+            return np.inf
+        
+        D_calc = self.get_D_function(model)(a[0], b)
+        return D_calc - D_target
+
+    def numerical_derivative(self, func, x):
+        """Calculate numerical derivative using numdifftools"""
+        try:
+            derivative_func = nd.Derivative(func, step=1e-5, method='central')
+            return derivative_func(x)
+        except Exception as e:
+            print(f"Error in derivative calculation: {e}")
+            return 0.0
+
+    def calculate_uncertainty(self, param_optimized, known_param, D_target, sigma_D, sigma_known, mode, model):
+        """Calculate uncertainty using error propagation"""
+        
+        def D_function_param(param_val):
+            if mode == 'a':
+                return self.get_D_function(model)(param_val, known_param)
+            else:
+                return self.get_D_function(model)(known_param, param_val)
+                
+        def D_function_known(known_val):
+            if mode == 'a':
+                return self.get_D_function(model)(param_optimized, known_val)
+            else:
+                return self.get_D_function(model)(known_val, param_optimized)
+        
+        dD_dparam = self.numerical_derivative(D_function_param, param_optimized)
+        dD_dknown = self.numerical_derivative(D_function_known, known_param)
+        
+        if abs(dD_dparam) < 1e-15:
+            return float('inf')
+        
+        variance_param = (sigma_D**2 + (dD_dknown**2 * sigma_known**2)) / (dD_dparam**2)
+        return math.sqrt(abs(variance_param))
+
+    def calculate(self):
+        """Main calculation function"""
+        try:
+            # Get input values
+            D_target = float(self.d_entry.get())
+            model = self.model.get()
+            calc_mode = self.calc_mode.get()
+            
+            # Clear previous results
+            self.results_text.delete('1.0', tk.END)
+            self.fig.clear()
+            
+            if calc_mode == "calculate_b":
+                a = float(self.a_entry.get())
+                
+                # Get uncertainty values if needed
+                if self.uncertainty_var.get():
+                    sigma_D = float(self.sigma_d_entry.get())
+                    sigma_a = float(self.sigma_a_entry.get())
+                else:
+                    sigma_D = None
+                    sigma_a = None
+                
+                # Initial estimate for b
+                b_initial = a + 0.1
+                
+                # Optimization
+                result = leastsq(self.objective_function_b, [b_initial], args=(a, D_target, model))
+                b_optimized = result[0][0]
+                
+                # Final error
+                final_error = self.objective_function_b([b_optimized], a, D_target, model)
+                
+                # Calculate uncertainty if requested
+                if sigma_D is not None and sigma_a is not None:
+                    sigma_b = self.calculate_uncertainty(b_optimized, a, D_target, sigma_D, sigma_a, 'b', model)
+                else:
+                    sigma_b = None
+                
+                # Display results
+                self.display_results_b(a, b_optimized, sigma_a, sigma_b, final_error, model, D_target)
+                
+                # Create plots
+                self.create_plots_b(a, b_optimized, sigma_b, D_target, model)
+                
+            else:  # calculate_a
+                b = float(self.b_entry.get())
+                
+                # Get uncertainty values if needed
+                if self.uncertainty_var.get():
+                    sigma_D = float(self.sigma_d_entry.get())
+                    sigma_b = float(self.sigma_b_entry.get())
+                else:
+                    sigma_D = None
+                    sigma_b = None
+                
+                # Initial estimate for a
+                a_initial = b * 0.5
+                
+                # Optimization
+                result = leastsq(self.objective_function_a, [a_initial], args=(b, D_target, model))
+                a_optimized = result[0][0]
+                
+                # Final error
+                final_error = self.objective_function_a([a_optimized], b, D_target, model)
+                
+                # Calculate uncertainty if requested
+                if sigma_D is not None and sigma_b is not None:
+                    sigma_a = self.calculate_uncertainty(a_optimized, b, D_target, sigma_D, sigma_b, 'a', model)
+                else:
+                    sigma_a = None
+                
+                # Display results
+                self.display_results_a(a_optimized, b, sigma_a, sigma_b, final_error, model, D_target)
+                
+                # Create plots
+                self.create_plots_a(a_optimized, b, sigma_a, D_target, model)
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Calculation error: {str(e)}")
+
+    def display_results_b(self, a, b_optimized, sigma_a, sigma_b, final_error, model, D_target):
+        """Display results for b calculation"""
+        results = f"CALCULATION RESULTS (Model: {model})\n"
+        results += "=" * 50 + "\n\n"
+        results += f"Given parameters:\n"
+        results += f"  a = {a:.2f} nm"
+        if sigma_a is not None:
+            results += f" (σ_a = {sigma_a:.2f} nm)"
+        results += f"\n  D_target = {D_target:.6e} m²/s\n\n"
+        
+        results += f"Optimized parameter:\n"
+        results += f"  b = {b_optimized:.2f} nm"
+        if sigma_b is not None:
+            results += f" ± {sigma_b:.2f} nm"
+        results += f"\n\nAspect ratio (b/a) = {b_optimized/a:.2f}\n"
+        results += f"Final optimization error = {final_error:.6e}\n\n"
+        
+        # Compare with other models
+        results += "Comparison with other models:\n"
+        results += "-" * 30 + "\n"
+        models = {'Original': 'original', 'Perrin': 'perrin', 'Modern': 'modern'}
+        for name, model_key in models.items():
+            try:
+                D_calc = self.get_D_function(model_key)(a, b_optimized)
+                diff = abs(D_calc - D_target)
+                results += f"{name:12s}: D = {D_calc:.6e} m²/s (diff = {diff:.6e})\n"
+            except:
+                results += f"{name:12s}: Calculation failed\n"
+        
+        self.results_text.insert(tk.END, results)
+
+    def display_results_a(self, a_optimized, b, sigma_a, sigma_b, final_error, model, D_target):
+        """Display results for a calculation"""
+        results = f"CALCULATION RESULTS (Model: {model})\n"
+        results += "=" * 50 + "\n\n"
+        results += f"Given parameters:\n"
+        results += f"  b = {b:.2f} nm"
+        if sigma_b is not None:
+            results += f" (σ_b = {sigma_b:.2f} nm)"
+        results += f"\n  D_target = {D_target:.6e} m²/s\n\n"
+        
+        results += f"Optimized parameter:\n"
+        results += f"  a = {a_optimized:.2f} nm"
+        if sigma_a is not None:
+            results += f" ± {sigma_a:.2f} nm"
+        results += f"\n\nAspect ratio (b/a) = {b/a_optimized:.2f}\n"
+        results += f"Final optimization error = {final_error:.6e}\n\n"
+        
+        # Compare with other models
+        results += "Comparison with other models:\n"
+        results += "-" * 30 + "\n"
+        models = {'Original': 'original', 'Perrin': 'perrin', 'Modern': 'modern'}
+        for name, model_key in models.items():
+            try:
+                D_calc = self.get_D_function(model_key)(a_optimized, b)
+                diff = abs(D_calc - D_target)
+                results += f"{name:12s}: D = {D_calc:.6e} m²/s (diff = {diff:.6e})\n"
+            except:
+                results += f"{name:12s}: Calculation failed\n"
+        
+        self.results_text.insert(tk.END, results)
+
+    def create_plots_b(self, a, b_optimized, sigma_b, D_target, model):
+        """Create analysis plots for b calculation"""
+        try:
+            # Generate data for plotting
+            b_values = np.linspace(a + 0.001, b_optimized * 1.5, 3000)
+            errors = []
+            D_original_values = []
+            D_perrin_values = []
+            D_modern_values = []
+            
+            for b_val in b_values:
+                try:
+                    error = self.objective_function_b([b_val], a, D_target, model)
+                    errors.append(error)
+                    
+                    D_original_values.append(self.calculate_D_original(a, b_val))
+                    D_perrin_values.append(self.calculate_D_perrin(a, b_val))
+                    D_modern_values.append(self.calculate_D_modern(a, b_val))
+                except:
+                    errors.append(np.inf)
+                    D_original_values.append(np.nan)
+                    D_perrin_values.append(np.nan)
+                    D_modern_values.append(np.nan)
+            
+            # Create subplots
+            self.fig.clear()
+            
+            # Error function plot
+            ax1 = self.fig.add_subplot(2, 2, 1)
+            ax1.plot(b_values, errors, 'b-', label=f'Error ({model})')
+            ax1.axvline(x=b_optimized, color='r', linestyle='--', label=f'b optimized = {b_optimized:.2f} nm')
+            if sigma_b is not None and sigma_b != float('inf'):
+                ax1.axvspan(b_optimized - sigma_b, b_optimized + sigma_b, alpha=0.3, color='red')
+            ax1.set_xlabel('b value (nm)')
+            ax1.set_ylabel('Error (D_calc - D_target)')
+            ax1.set_title('Error Function vs b')
+            ax1.legend()
+            ax1.grid(True)
+            
+            # Model comparison plot
+            ax2 = self.fig.add_subplot(2, 2, 2)
+            ax2.plot(b_values, D_original_values, 'b-', label='Original', alpha=0.7)
+            ax2.plot(b_values, D_perrin_values, 'r--', label='Perrin', alpha=0.7)
+            ax2.plot(b_values, D_modern_values, 'g-.', label='Modern', alpha=0.7)
+            ax2.axhline(y=D_target, color='k', linestyle=':', label=f'D target')
+            ax2.axvline(x=b_optimized, color='r', linestyle=':', alpha=0.7)
+            ax2.set_xlabel('b value (nm)')
+            ax2.set_ylabel('Diffusion Coefficient D (m²/s)')
+            ax2.set_title('Model Comparison')
+            ax2.legend()
+            ax2.grid(True)
+            ax2.set_yscale('log')
+            
+            # Aspect ratio plot
+            ax3 = self.fig.add_subplot(2, 2, 3)
+            aspect_ratios = [b_val/a for b_val in b_values]
+            ax3.plot(aspect_ratios, D_original_values, 'b-', label='Original')
+            ax3.axhline(y=D_target, color='r', linestyle=':', label='D target')
+            ax3.axvline(x=b_optimized/a, color='r', linestyle='--', label=f'AR optimized = {b_optimized/a:.2f}')
+            ax3.set_xlabel('Aspect Ratio (b/a)')
+            ax3.set_ylabel('Diffusion Coefficient D (m²/s)')
+            ax3.set_title('D vs Aspect Ratio')
+            ax3.legend()
+            ax3.grid(True)
+            ax3.set_yscale('log')
+            
+            # Percentage differences
+            ax4 = self.fig.add_subplot(2, 2, 4)
+            diff_perrin = [(d_p - d_o)/d_o * 100 for d_p, d_o in zip(D_perrin_values, D_original_values)]
+            diff_modern = [(d_m - d_o)/d_o * 100 for d_m, d_o in zip(D_modern_values, D_original_values)]
+            
+            ax4.plot(aspect_ratios, diff_perrin, 'r--', label='Perrin')
+            ax4.plot(aspect_ratios, diff_modern, 'g-.', label='Modern')
+            ax4.axvline(x=b_optimized/a, color='r', linestyle=':', alpha=0.7)
+            ax4.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+            ax4.set_xlabel('Aspect Ratio (b/a)')
+            ax4.set_ylabel('% Difference from Original')
+            ax4.set_title('Percentage Differences')
+            ax4.legend()
+            ax4.grid(True)
+            
+            self.fig.tight_layout()
+            self.canvas.draw()
+            
+        except Exception as e:
+            print(f"Error creating plots: {e}")
+
+    def create_plots_a(self, a_optimized, b, sigma_a, D_target, model):
+        """Create analysis plots for a calculation"""
+        try:
+            # Generate data for plotting
+            a_values = np.linspace(0.01, b - 0.01, 1000)
+            errors = []
+            D_original_values = []
+            D_perrin_values = []
+            D_modern_values = []
+            
+            for a_val in a_values:
+                try:
+                    error = self.objective_function_a([a_val], b, D_target, model)
+                    errors.append(error)
+                    
+                    D_original_values.append(self.calculate_D_original(a_val, b))
+                    D_perrin_values.append(self.calculate_D_perrin(a_val, b))
+                    D_modern_values.append(self.calculate_D_modern(a_val, b))
+                except:
+                    errors.append(np.inf)
+                    D_original_values.append(np.nan)
+                    D_perrin_values.append(np.nan)
+                    D_modern_values.append(np.nan)
+            
+            # Create subplots
+            self.fig.clear()
+            
+            # Error function plot
+            ax1 = self.fig.add_subplot(2, 2, 1)
+            ax1.plot(a_values, errors, 'b-', label=f'Error ({model})')
+            ax1.axvline(x=a_optimized, color='r', linestyle='--', label=f'a optimized = {a_optimized:.2f} nm')
+            if sigma_a is not None and sigma_a != float('inf'):
+                ax1.axvspan(a_optimized - sigma_a, a_optimized + sigma_a, alpha=0.3, color='red')
+            ax1.set_xlabel('a value (nm)')
+            ax1.set_ylabel('Error (D_calc - D_target)')
+            ax1.set_title('Error Function vs a')
+            ax1.legend()
+            ax1.grid(True)
+            
+            # Model comparison plot
+            ax2 = self.fig.add_subplot(2, 2, 2)
+            ax2.plot(a_values, D_original_values, 'b-', label='Original', alpha=0.7)
+            ax2.plot(a_values, D_perrin_values, 'r--', label='Perrin', alpha=0.7)
+            ax2.plot(a_values, D_modern_values, 'g-.', label='Modern', alpha=0.7)
+            ax2.axhline(y=D_target, color='k', linestyle=':', label=f'D target')
+            ax2.axvline(x=a_optimized, color='r', linestyle=':', alpha=0.7)
+            ax2.set_xlabel('a value (nm)')
+            ax2.set_ylabel('Diffusion Coefficient D (m²/s)')
+            ax2.set_title('Model Comparison')
+            ax2.legend()
+            ax2.grid(True)
+            ax2.set_yscale('log')
+            
+            # Aspect ratio plot
+            ax3 = self.fig.add_subplot(2, 2, 3)
+            aspect_ratios = [b/a_val for a_val in a_values]
+            ax3.plot(aspect_ratios, D_original_values, 'b-', label='Original')
+            ax3.axhline(y=D_target, color='r', linestyle=':', label='D target')
+            ax3.axvline(x=b/a_optimized, color='r', linestyle='--', label=f'AR optimized = {b/a_optimized:.2f}')
+            ax3.set_xlabel('Aspect Ratio (b/a)')
+            ax3.set_ylabel('Diffusion Coefficient D (m²/s)')
+            ax3.set_title('D vs Aspect Ratio')
+            ax3.legend()
+            ax3.grid(True)
+            ax3.set_yscale('log')
+            
+            # Percentage differences
+            ax4 = self.fig.add_subplot(2, 2, 4)
+            diff_perrin = [(d_p - d_o)/d_o * 100 for d_p, d_o in zip(D_perrin_values, D_original_values)]
+            diff_modern = [(d_m - d_o)/d_o * 100 for d_m, d_o in zip(D_modern_values, D_original_values)]
+            
+            ax4.plot(aspect_ratios, diff_perrin, 'r--', label='Perrin')
+            ax4.plot(aspect_ratios, diff_modern, 'g-.', label='Modern')
+            ax4.axvline(x=b/a_optimized, color='r', linestyle=':', alpha=0.7)
+            ax4.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+            ax4.set_xlabel('Aspect Ratio (b/a)')
+            ax4.set_ylabel('% Difference from Original')
+            ax4.set_title('Percentage Differences')
+            ax4.legend()
+            ax4.grid(True)
+            
+            self.fig.tight_layout()
+            self.canvas.draw()
+            
+        except Exception as e:
+            print(f"Error creating plots: {e}")
+
+    def compare_models(self):
+        """Compare all models for given parameters"""
+        try:
+            a = float(self.comp_a_entry.get())
+            b = float(self.comp_b_entry.get())
+            
+            if b <= a:
+                messagebox.showerror("Error", "b must be greater than a for prolate ellipsoids")
+                return
+            
+            # Clear previous results
+            self.comp_results_text.delete('1.0', tk.END)
+            self.comp_fig.clear()
+            
+            # Calculate diffusion coefficients for all models
+            models = {'Original': 'original', 'Perrin': 'perrin', 'Modern': 'modern'}
+            D_values = {}
+            
+            results = f"MODEL COMPARISON\n"
+            results += "=" * 40 + "\n\n"
+            results += f"Parameters: a = {a:.2f} nm, b = {b:.2f} nm\n"
+            results += f"Aspect ratio (b/a) = {b/a:.2f}\n\n"
+            
+            for name, model_key in models.items():
+                try:
+                    D = self.get_D_function(model_key)(a, b)
+                    D_values[name] = D
+                    results += f"{name:12s}: D = {D:.6e} m²/s\n"
+                except Exception as e:
+                    results += f"{name:12s}: Error - {str(e)}\n"
+                    D_values[name] = None
+            
+            # Calculate relative differences
+            if 'Original' in D_values and D_values['Original'] is not None:
+                results += "\nRelative differences from Original model:\n"
+                results += "-" * 40 + "\n"
+                for name, D in D_values.items():
+                    if name != 'Original' and D is not None:
+                        diff = (D - D_values['Original']) / D_values['Original'] * 100
+                        results += f"{name:12s}: {diff:+6.2f}%\n"
+            
+            self.comp_results_text.insert(tk.END, results)
+            
+            # Create comparison plots
+            self.create_comparison_plots(a, b, D_values)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Comparison error: {str(e)}")
+
+    def create_comparison_plots(self, a_fixed, b_fixed, D_values_fixed):
+        """Create plots comparing models across parameter ranges"""
+        try:
+            self.comp_fig.clear()
+            
+            # Plot 1: D vs aspect ratio
+            ax1 = self.comp_fig.add_subplot(2, 2, 1)
+            
+            # Generate aspect ratio range
+            p_values = np.linspace(1.1, 20, 100)
+            a_test = 5.0  # Fixed a for comparison
+            
+            D_original_p = []
+            D_perrin_p = []
+            D_modern_p = []
+            
+            for p in p_values:
+                b_test = a_test * p
+                try:
+                    D_original_p.append(self.calculate_D_original(a_test, b_test))
+                    D_perrin_p.append(self.calculate_D_perrin(a_test, b_test))
+                    D_modern_p.append(self.calculate_D_modern(a_test, b_test))
+                except:
+                    D_original_p.append(np.nan)
+                    D_perrin_p.append(np.nan)
+                    D_modern_p.append(np.nan)
+            
+            ax1.plot(p_values, D_original_p, 'b-', label='Original', linewidth=2)
+            ax1.plot(p_values, D_perrin_p, 'r--', label='Perrin', linewidth=2)
+            ax1.plot(p_values, D_modern_p, 'g-.', label='Modern', linewidth=2)
+            ax1.axvline(x=b_fixed/a_fixed, color='k', linestyle=':', alpha=0.7, label='Current')
+            ax1.set_xlabel('Aspect Ratio (b/a)')
+            ax1.set_ylabel('Diffusion Coefficient (m²/s)')
+            ax1.set_title('D vs Aspect Ratio (a = 5 nm)')
+            ax1.legend()
+            ax1.grid(True)
+            ax1.set_yscale('log')
+            
+            # Plot 2: Relative differences vs aspect ratio
+            ax2 = self.comp_fig.add_subplot(2, 2, 2)
+            
+            diff_perrin = [(d_p - d_o)/d_o * 100 for d_p, d_o in zip(D_perrin_p, D_original_p)]
+            diff_modern = [(d_m - d_o)/d_o * 100 for d_m, d_o in zip(D_modern_p, D_original_p)]
+            
+            ax2.plot(p_values, diff_perrin, 'r--', label='Perrin vs Original', linewidth=2)
+            ax2.plot(p_values, diff_modern, 'g-.', label='Modern vs Original', linewidth=2)
+            ax2.axvline(x=b_fixed/a_fixed, color='k', linestyle=':', alpha=0.7)
+            ax2.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+            ax2.set_xlabel('Aspect Ratio (b/a)')
+            ax2.set_ylabel('Relative Difference (%)')
+            ax2.set_title('Model Differences vs Aspect Ratio')
+            ax2.legend()
+            ax2.grid(True)
+            
+            # Plot 3: Bar chart for current parameters
+            ax3 = self.comp_fig.add_subplot(2, 2, 3)
+            
+            models = []
+            values = []
+            colors = ['blue', 'red', 'green']
+            
+            for name, D in D_values_fixed.items():
+                if D is not None:
+                    models.append(name)
+                    values.append(D * 1e12)  # Convert to pm²/s for better readability
+            
+            bars = ax3.bar(models, values, color=colors[:len(models)], alpha=0.7)
+            ax3.set_ylabel('Diffusion Coefficient (×10⁻¹² m²/s)')
+            ax3.set_title(f'D for a={a_fixed:.1f} nm, b={b_fixed:.1f} nm')
+            ax3.grid(True, axis='y')
+            
+            # Add value labels on bars
+            for bar, value in zip(bars, values):
+                height = bar.get_height()
+                ax3.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{value:.2f}', ha='center', va='bottom')
+            
+            # Plot 4: D vs particle size (keeping aspect ratio constant)
+            ax4 = self.comp_fig.add_subplot(2, 2, 4)
+            
+            # Keep aspect ratio constant, vary size
+            p_fixed = b_fixed / a_fixed
+            a_size_values = np.linspace(1, 20, 50)
+            
+            D_original_size = []
+            D_perrin_size = []
+            D_modern_size = []
+            
+            for a_val in a_size_values:
+                b_val = a_val * p_fixed
+                try:
+                    D_original_size.append(self.calculate_D_original(a_val, b_val))
+                    D_perrin_size.append(self.calculate_D_perrin(a_val, b_val))
+                    D_modern_size.append(self.calculate_D_modern(a_val, b_val))
+                except:
+                    D_original_size.append(np.nan)
+                    D_perrin_size.append(np.nan)
+                    D_modern_size.append(np.nan)
+            
+            ax4.plot(a_size_values, D_original_size, 'b-', label='Original', linewidth=2)
+            ax4.plot(a_size_values, D_perrin_size, 'r--', label='Perrin', linewidth=2)
+            ax4.plot(a_size_values, D_modern_size, 'g-.', label='Modern', linewidth=2)
+            ax4.axvline(x=a_fixed, color='k', linestyle=':', alpha=0.7, label='Current')
+            ax4.set_xlabel('Semi-minor axis a (nm)')
+            ax4.set_ylabel('Diffusion Coefficient (m²/s)')
+            ax4.set_title(f'D vs Size (AR = {p_fixed:.1f})')
+            ax4.legend()
+            ax4.grid(True)
+            ax4.set_yscale('log')
+            
+            self.comp_fig.tight_layout()
+            self.comp_canvas.draw()
+            
+        except Exception as e:
+            print(f"Error creating comparison plots: {e}")
+
+def main():
+    root = tk.Tk()
+    app = DiffusionCalculatorGUI(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
